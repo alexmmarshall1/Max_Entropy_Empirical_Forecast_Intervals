@@ -3,7 +3,7 @@
 #By: Alexander Michael Marshall
 #Email: alexmmarshall1@gmail.com
 ####################################################################################################
-library(dyn) #import dyn package for an easy solution to modelling dynamic regression
+library(dyn) #import dyn package for an easy solution to dynamic regression
 library(TSPred) #import TSPred for the NN3 Competition data and sMAPE function (symmetrical mean absolute percent error)
 library(quantmod) #import quantmod for Next() function 
 library(meboot) #import meboot for Maximum Entropy Bootstrapping
@@ -34,7 +34,7 @@ slices<-createTimeSlices(ts(data.set),horizon=number.horizon,initialWindow=(leng
 dyn.coef<-function(data,form){x=dyn$model.frame(form,data=zoo(data));return(coef(lm.fit(y=as.matrix(x[,1]),x=as.matrix(x[,2:dim(x)[2]]))))}
 
 
-#univariate nonlinear regression for time series
+#random univariate fractional polynomial (nonlinear) regression formula
 model.formula<-c("Next(y)~1+Lag(y^(-1.2),1)+Lag(y^(2.3),2)")
 #note: since I am using Next() function, the dependent variable is the next value of y--not the current value--therefore, each Lag variable is shifted one value
 #example: using Next(), Next(y)~Lag(y,0) = y~Lag(y,1)
