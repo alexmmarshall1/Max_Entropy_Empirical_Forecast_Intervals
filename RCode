@@ -1,0 +1,101 @@
+####################################################################################################
+#MAXIMUM ENTROPY BOOTSTRAP EMPIRICAL FORECAST INTERVALS USING SLIDING WINDOW TECHNIQUE
+#By: Alexander Michael Marshall
+#Email: alexmmarshall1@gmail.com
+####################################################################################################
+library(dyn) #import dyn package for an easy solution to modelling dynamic regression
+library(TSPred) #import TSPred for the NN3 Competition data and sMAPE function (symmetrical mean absolute percent error)
+library(quantmod) #import quantmod for Next() function 
+library(meboot) #import meboot for Maximum Entropy Bootstrapping
+library(foreach) #import foreach for foreach loops
+library(abind) #import abind for binding arrays/matrixes above 2 dimension
+library(caret) #import caret for createTimeSlices function for creating rolling forecast origin slices
+library(doSNOW) #import doSNOW for parallel computation of foreach loop
+acomb <- function(...) abind(..., along=3)  #function to bind on the 3rd dimension of an array/matrix
+
+forecastdensity<-function(X,Xhat,actual,startz=-2,endz=2,byz=0.5){ 
+  X=t(mapply(function(x)Xhat[x]+t(X[x]*matrix(seq(startz,endz,by=byz))),1:length(X)));
+  matplot(cbind(actual,X),type="l",col=rainbow(((endz-startz)/byz)));
+return(X) }
+
+
+data("NN3.A") #NN3 Competition historical data sets
+data("NN3.A.cont") #NN3 Competition actual future values
+
+set.seed(345); #set seed to 3 for reproducibility
+me.reps=10; #set number of maximum entropy bootstraps -- I would recommend more than this, but lets test 100.
+
+data.set<-ts(as.matrix(na.omit(NN3.A[102])),names=c("y")) #import NN3_101 data
+future.set<-ts(as.matrix(na.omit(NN3.A.cont[102])),names=c("y"),start=index(data.set)[length(data.set)]) #import NN3_101 true future values
+
+number.horizon=length(future.set); #grab length of forecast
+slices<-createTimeSlices(ts(data.set),horizon=number.horizon,initialWindow=(length(data.set)-(2*number.horizon)+1),fixed=TRUE) #create time slices for rolling forecast origin
+
+dyn.coef<-function(data,form){x=dyn$model.frame(form,data=zoo(data));return(coef(lm.fit(y=as.matrix(x[,1]),x=as.matrix(x[,2:dim(x)[2]]))))}
+
+
+#univariate nonlinear regression for time series
+model.formula<-c("Next(y)~1+Lag(y^(-1.2),1)+Lag(y^(2.3),2)")
+#note: since I am using Next() function, the dependent variable is the next value of y--not the current value--therefore, each Lag variable is shifted one value
+#example: using Next(), Next(y)~Lag(y,0) = y~Lag(y,1)
+
+me.sets<-meboot(data.set,reps=me.reps,sym=TRUE,scl.adjustment=TRUE)$ens; #maximum entropy bootstrap ensembles -- symmetry & scaling for a closer to normal distribution about the original time series data set
+
+
+
+me.results<-foreach(k=1:number.horizon,.packages=c("dyn","quantmod")) %do% { #acomb function binds on the 3rd dimension
+	me.train.sets<-me.sets[slices$train[[k]],] #ensemble in-sample training sets for each position across the sliding frame
+	me.test.sets<-me.sets[slices$test[[k]],] #ensemble in-sample training sets for each position across the sliding framesme.train.sets<-mapply(function(i) as.matrix(me.sets[slices$train[[k]],i]),1:me.reps) #ensemble in-sample training sets for each position across the sliding frame
+	me.models<-lapply(1:me.reps,function(i) dyn$lm(formula(model.formula,data=zoo(ts(as.matrix(me.train.sets[,i]),name="y"))),data=zoo(ts(as.matrix(me.train.sets[,i]),name="y")))) #build linear model with given formula about each in-sample training set
+	me.yhat=matrix(NA,number.horizon,me.reps); #set up matrix for in-sample multi-step forecasting
+	me.yhat<-rbind(me.train.sets,me.yhat); #binding ensemble sets for in-sample multi-step forecasting for each frame
+	for(j in 1:me.reps){for(i in 1:number.horizon){me.yhat[(dim(me.train.sets)[1]+i),j]<-tail(predict(me.models[[j]],newdata=zoo(ts(as.matrix(me.yhat[1:(dim(me.train.sets)[1]+i-1),j]),name="y"))),1)}}; #multi-step in-sample forecasting for each position across the sliding frame
+	me.yhat<-tail(me.yhat,number.horizon); #grab each in-sample forecast
+	me.rmsfe<-sqrt(rowMeans((me.test.sets-me.yhat)^2)) #calculate the root mean squared forecasting error for each in-sample forecast across the sliding frame
+	me.models<-rowMeans(mapply(function(x) coef(me.models[[x]]),1:me.reps))
+	append(list(as.matrix(me.rmsfe)),list(me.models)) #send back in-sample rmsfe and the multi-step out-of-sample forecast
+}
+
+
+me.train.sets<-me.sets[(slices$train[[number.horizon]]+number.horizon),]
+me.models<-lapply(1:me.reps,function(i) dyn$lm(formula(model.formula,data=zoo(ts(as.matrix(me.train.sets[,i]),name="y"))),data=zoo(ts(as.matrix(me.train.sets[,i]),name="y")))) #build linear model with given formula about each in-sample training set
+me.yhat=matrix(NA,number.horizon,me.reps); #set up matrix for out-of-sample multi-step forecasting
+me.yhat<-rbind(me.train.sets,me.yhat); #binding ensemble sets for out-of-sample multi-step forecasting across each frame
+for(j in 1:me.reps){for(i in 1:number.horizon){me.yhat[(dim(me.train.sets)[1]+i),j]<-tail(predict(me.models[[j]],newdata=zoo(ts(as.matrix(me.yhat[1:(dim(me.train.sets)[1]+i-1),j]),name="y"))),1)}}; #multi-step out-of-sample forecasting for each position across the horizon
+me.yhat<-as.matrix(tail(me.yhat,number.horizon))
+me.coef.final<-foreach (i=1:length(me.models),.combine=cbind) %do% {as.matrix(coef(me.models[[i]]))}
+
+
+me.coef.sliding<-mapply(function(x) me.results[[x]][[2]],1:number.horizon)
+me.rmsfe<-as.matrix((mapply(function(x) me.results[[x]][[1]],1:number.horizon))) 
+
+rmsfe<-rowMeans(me.rmsfe) #take the mean rmsfe at each in-sample step
+yhat<-as.matrix(ts(rowMeans((me.yhat)))) #take the mean forecast at each out-of-sample step
+
+
+sMAPE(yhat,future.set) #calculate symmetrical MAPE
+
+
+quartz()
+yhatdensity<-forecastdensity(X=rmsfe,Xhat=yhat,actual=future.set) # -2 to +2 sd by half a standard deviation (if normal, the outer limits cover a little more than 95% confidence interval)
+
+
+quartz()
+par(mfrow = c(3, 6))
+for (i in 1:18) {
+plot(density(me.rmsfe[i,])$y,type="l")}
+
+quartz()
+par(mfrow = c(3, 6))
+for (i in 1:18) {
+plot(density(me.yhat[i,])$y,type="l")}
+
+quartz()
+par(mfrow = c(1,3))
+for (i in 1:dim(me.coef.final)[1]) {
+	plot(density(me.coef.final[i,])$y,type="l")}
+
+quartz()
+par(mfrow = c(1,3))
+for (i in 1:dim(me.coef.sliding)[1]) {
+	plot(density(me.coef.sliding[i,])$y,type="l")}
